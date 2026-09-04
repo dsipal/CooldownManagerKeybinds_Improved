@@ -1,0 +1,22 @@
+## Interface: 120000, 120001
+## Title: CooldownManagerKeybinds
+## Notes: Shows action bar keybinds on Blizzard Cooldown Manager icons.
+## Author: ahux
+## Version: 1.2.3
+## SavedVariables: CMK_DB
+## IconTexture: Interface\AddOns\CooldownManagerKeybinds\icon
+## Category: Combat
+
+libs\LibStub\LibStub.lua
+libs\CallbackHandler-1.0\CallbackHandler-1.0.lua
+
+libs\AceDB-3.0\AceDB-3.0.lua
+
+libs\AceGUI-3.0\AceGUI-3.0.xml
+libs\AceConfigRegistry-3.0\AceConfigRegistry-3.0.lua
+libs\AceConfigDialog-3.0\AceConfigDialog-3.0.lua
+
+libs\LibSharedMedia-3.0\LibSharedMedia-3.0.lua
+
+Core.lua
+Options.lua
