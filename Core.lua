@@ -91,6 +91,29 @@ local function SafeRegister(frame, event)
     return ok
 end
 
+-- Secret values (WoW 12.0+): the client hands tainted code black-boxed values
+-- for anything combat-sensitive. type() and plain assignment stay legal, but
+-- comparing one, doing arithmetic on it, calling a method on it, or using it as
+-- a table key all raise a Lua error. Every ID we take from a Blizzard frame has
+-- to clear these guards before it reaches a comparison or a map lookup; an ID we
+-- cannot inspect is simply one we cannot resolve a keybind for, so we drop it.
+local function IsUsableID(v)
+    if issecretvalue and issecretvalue(v) then return false end
+    return type(v) == "number" and v > 0
+end
+
+local function IsUsableString(v)
+    if issecretvalue and issecretvalue(v) then return false end
+    return type(v) == "string" and v ~= ""
+end
+
+local function CanReadTable(t)
+    if type(t) ~= "table" then return false end
+    if issecrettable and issecrettable(t) then return false end
+    if canaccesstable and not canaccesstable(t) then return false end
+    return true
+end
+
 local function Trim(s)
     if s == nil then return nil end
     if type(s) ~= "string" then
@@ -237,7 +260,7 @@ end
 -- Spell resolution
 -- ------------------------------------------------------------
 local function GetSpellIDFromName(spellName)
-    if not spellName or spellName == "" then return nil end
+    if not IsUsableString(spellName) then return nil end
 
     local n = tonumber(spellName)
     if n then
@@ -249,40 +272,40 @@ local function GetSpellIDFromName(spellName)
 
     if C_Spell and C_Spell.GetSpellIDForSpellIdentifier then
         local sid = C_Spell.GetSpellIDForSpellIdentifier(spellName)
-        if sid and sid ~= 0 then return sid end
+        if IsUsableID(sid) then return sid end
     end
 
     if C_Spell and C_Spell.GetSpellInfo then
         local info = C_Spell.GetSpellInfo(spellName)
-        if info and info.spellID and info.spellID ~= 0 then
+        if CanReadTable(info) and IsUsableID(info.spellID) then
             return info.spellID
         end
     end
 
     if GetSpellInfo then
         local sid = select(7, GetSpellInfo(spellName))
-        if sid and sid ~= 0 then return sid end
+        if IsUsableID(sid) then return sid end
     end
 
     return nil
 end
 
 local function GetSpellNameFromID(spellID)
-    if not spellID or spellID == 0 then return nil end
+    if not IsUsableID(spellID) then return nil end
 
     if C_Spell and C_Spell.GetSpellName then
         local n = C_Spell.GetSpellName(spellID)
-        if n and n ~= "" then return n end
+        if IsUsableString(n) then return n end
     end
 
     if C_Spell and C_Spell.GetSpellInfo then
         local info = C_Spell.GetSpellInfo(spellID)
-        if info and info.name and info.name ~= "" then return info.name end
+        if CanReadTable(info) and IsUsableString(info.name) then return info.name end
     end
 
     if GetSpellInfo then
         local n = GetSpellInfo(spellID)
-        if n and n ~= "" then return n end
+        if IsUsableString(n) then return n end
     end
 
     return nil
@@ -292,14 +315,14 @@ end
 -- Item helpers
 -- ------------------------------------------------------------
 local function GetItemNameFromID(itemID)
-    if not itemID or itemID == 0 then return nil end
+    if not IsUsableID(itemID) then return nil end
     if C_Item and C_Item.GetItemNameByID then
         local n = C_Item.GetItemNameByID(itemID)
-        if n and n ~= "" then return n end
+        if IsUsableString(n) then return n end
     end
     if GetItemInfo then
         local name = GetItemInfo(itemID)
-        if name and name ~= "" then return name end
+        if IsUsableString(name) then return name end
     end
     return nil
 end
@@ -365,7 +388,7 @@ local function ExtractFirstCastSpellToken(body)
 end
 
 local function GetMacroBodySafe(macroIndex)
-    if not macroIndex or macroIndex == 0 then return nil end
+    if not IsUsableID(macroIndex) then return nil end
 
     if GetMacroInfo then
         local _, _, body = GetMacroInfo(macroIndex)
@@ -436,11 +459,11 @@ local function ExtractShowtooltipSpellName(body)
 end
 
 local function ResolveMacroSpellID(macroIndex, body)
-    if not macroIndex or macroIndex == 0 then return nil end
+    if not IsUsableID(macroIndex) then return nil end
 
     if GetMacroSpell then
         local v = GetMacroSpell(macroIndex)
-        if type(v) == "number" and v > 0 then
+        if IsUsableID(v) then
             return v
         end
         if type(v) == "string" then
@@ -474,25 +497,25 @@ local function TryGetKeyFromButton(button)
 
     if button.config and button.config.keyBoundTarget then
         local k = GetBindingKey(button.config.keyBoundTarget)
-        if k and k ~= "" then return k end
+        if IsUsableString(k) then return k end
     end
 
     if button.commandName then
         local k = GetBindingKey(button.commandName)
-        if k and k ~= "" then return k end
+        if IsUsableString(k) then return k end
     end
 
     local name = button.GetName and button:GetName()
-    if name and GetBindingKey then
+    if IsUsableString(name) and GetBindingKey then
         local k = GetBindingKey("CLICK " .. name .. ":LeftButton")
-        if k and k ~= "" then return k end
+        if IsUsableString(k) then return k end
         k = GetBindingKey("CLICK " .. name .. ":RightButton")
-        if k and k ~= "" then return k end
+        if IsUsableString(k) then return k end
     end
 
     if button.HotKey and button.HotKey.GetText then
         local t = button.HotKey:GetText()
-        if t and t ~= "" and t ~= "●" then
+        if IsUsableString(t) and t ~= "●" then
             return t
         end
     end
@@ -529,7 +552,7 @@ end
 
 local function AddSpellKey(map, spellID, fmtKey)
     if not map or not map.byID or not map.byName then return end
-    if not spellID or spellID == 0 then return end
+    if not IsUsableID(spellID) then return end
     if not fmtKey or fmtKey == "" then return end
     if map.byID[spellID] then return end
 
@@ -542,7 +565,7 @@ local function AddSpellKey(map, spellID, fmtKey)
 
     if C_Spell and C_Spell.GetOverrideSpell then
         local overrideID = C_Spell.GetOverrideSpell(spellID)
-        if overrideID and not map.byID[overrideID] then
+        if IsUsableID(overrideID) and not map.byID[overrideID] then
             map.byID[overrideID] = fmtKey
             local oname = GetSpellNameFromID(overrideID)
             if oname then AddSpellNameKey(map.byName, oname, fmtKey) end
@@ -551,7 +574,7 @@ local function AddSpellKey(map, spellID, fmtKey)
 
     if C_Spell and C_Spell.GetBaseSpell then
         local baseID = C_Spell.GetBaseSpell(spellID)
-        if baseID and not map.byID[baseID] then
+        if IsUsableID(baseID) and not map.byID[baseID] then
             map.byID[baseID] = fmtKey
             local bname = GetSpellNameFromID(baseID)
             if bname then AddSpellNameKey(map.byName, bname, fmtKey) end
@@ -562,7 +585,7 @@ end
 -- Macro wins when it resolves to a spell, to avoid wrong keybinds on conditional macros
 local function SetSpellKey(map, spellID, fmtKey)
     if not map or not map.byID or not map.byName then return end
-    if not spellID or spellID == 0 then return end
+    if not IsUsableID(spellID) then return end
     if not fmtKey or fmtKey == "" then return end
 
     map.byID[spellID] = fmtKey
@@ -574,7 +597,7 @@ local function SetSpellKey(map, spellID, fmtKey)
 
     if C_Spell and C_Spell.GetOverrideSpell then
         local overrideID = C_Spell.GetOverrideSpell(spellID)
-        if overrideID and overrideID ~= 0 then
+        if IsUsableID(overrideID) then
             map.byID[overrideID] = fmtKey
             local oname = GetSpellNameFromID(overrideID)
             if oname then map.byName[oname:lower()] = fmtKey end
@@ -583,7 +606,7 @@ local function SetSpellKey(map, spellID, fmtKey)
 
     if C_Spell and C_Spell.GetBaseSpell then
         local baseID = C_Spell.GetBaseSpell(spellID)
-        if baseID and baseID ~= 0 then
+        if IsUsableID(baseID) then
             map.byID[baseID] = fmtKey
             local bname = GetSpellNameFromID(baseID)
             if bname then map.byName[bname:lower()] = fmtKey end
@@ -593,19 +616,19 @@ end
 
 local function LookupKeyForSpell(map, spellID)
     if not map or not map.byID or not map.byName then return "" end
-    if not spellID then return "" end
+    if not IsUsableID(spellID) then return "" end
 
     local k = map.byID[spellID]
     if k then return k end
 
     if C_Spell and C_Spell.GetOverrideSpell then
         local o = C_Spell.GetOverrideSpell(spellID)
-        if o and map.byID[o] then return map.byID[o] end
+        if IsUsableID(o) and map.byID[o] then return map.byID[o] end
     end
 
     if C_Spell and C_Spell.GetBaseSpell then
         local b = C_Spell.GetBaseSpell(spellID)
-        if b and map.byID[b] then return map.byID[b] end
+        if IsUsableID(b) and map.byID[b] then return map.byID[b] end
     end
 
     local name = GetSpellNameFromID(spellID)
@@ -626,7 +649,7 @@ end
 
 local function AddItemKey(map, itemID, fmtKey)
     if not map or not map.itemsByID or not map.itemsByName then return end
-    if not itemID or itemID == 0 then return end
+    if not IsUsableID(itemID) then return end
     if not fmtKey or fmtKey == "" then return end
     if map.itemsByID[itemID] then return end
 
@@ -640,7 +663,7 @@ end
 
 local function LookupKeyForItem(map, itemID)
     if not map or not map.itemsByID or not map.itemsByName then return "" end
-    if not itemID then return "" end
+    if not IsUsableID(itemID) then return "" end
 
     local k = map.itemsByID[itemID]
     if k then return k end
@@ -661,14 +684,14 @@ local function GetBoundSpellIDFromButton(btn)
 
     if btn.spellID or btn.spellId or btn.SpellID then
         local sid = btn.spellID or btn.spellId or btn.SpellID
-        if type(sid) == "number" and sid > 0 then return sid end
+        if IsUsableID(sid) then return sid end
     end
 
     if btn.GetAttribute then
         local t = btn:GetAttribute("type") or btn:GetAttribute("type1")
-        if t == "spell" then
+        if IsUsableString(t) and t == "spell" then
             local spell = btn:GetAttribute("spell") or btn:GetAttribute("spell1")
-            if type(spell) == "number" and spell > 0 then return spell end
+            if IsUsableID(spell) then return spell end
             if type(spell) == "string" then
                 return GetSpellIDFromName(spell)
             end
@@ -690,17 +713,17 @@ local function GetBoundItemIDFromButton(btn)
 
     if btn.itemID or btn.itemId or btn.ItemID then
         local iid = btn.itemID or btn.itemId or btn.ItemID
-        if type(iid) == "number" and iid > 0 then return iid end
+        if IsUsableID(iid) then return iid end
     end
 
     if btn.GetAttribute then
         local t = btn:GetAttribute("type") or btn:GetAttribute("type1")
-        if t == "item" then
+        if IsUsableString(t) and t == "item" then
             local item = btn:GetAttribute("item") or btn:GetAttribute("item1")
-            if type(item) == "number" and item > 0 then return item end
+            if IsUsableID(item) then return item end
             if type(item) == "string" then
                 local n = tonumber(item)
-                if n and n > 0 then return n end
+                if IsUsableID(n) then return n end
             end
         end
     end
@@ -784,7 +807,7 @@ Adapters.Blizzard = {
                         -- IMPORTANT: paging (mount, vehicle, stance, etc.)
                         if ActionButton_GetPagedID then
                             local paged = ActionButton_GetPagedID(btn)
-                            if type(paged) == "number" and paged > 0 then
+                            if IsUsableID(paged) then
                                 slot = paged
                             end
                         end
@@ -871,10 +894,10 @@ local function ResolveMacroFromSlot(slot, id)
     local macroName = GetActionText and GetActionText(slot)
     if macroName and macroName ~= "" and GetMacroIndexByName then
         local idx = GetMacroIndexByName(macroName)
-        if idx and idx > 0 then return idx end
+        if IsUsableID(idx) then return idx end
     end
 
-    if type(id) == "number" and id > 0 then
+    if IsUsableID(id) then
         if GetMacroInfo then
             local name = GetMacroInfo(id)
             if name then return id end
@@ -1108,7 +1131,10 @@ local function ExtractSpellCandidates(icon)
 
     local out, seen = {}, {}
     local function add(id)
-        if type(id) ~= "number" or id <= 0 or seen[id] then return end
+        -- IsUsableID must run first: a secret ID cannot be compared or used as
+        -- a table key, so both the dedupe and the > 0 test below would error.
+        if not IsUsableID(id) then return end
+        if seen[id] then return end
         seen[id] = true
         out[#out + 1] = id
     end
@@ -1116,7 +1142,7 @@ local function ExtractSpellCandidates(icon)
     -- Ayije_CDM: spell data is accessed via GetCooldownInfo() or GetSpellID()
     if icon.GetCooldownInfo then
         local ok, info = pcall(icon.GetCooldownInfo, icon)
-        if ok and info then
+        if ok and CanReadTable(info) then
             add(info.overrideSpellID)
             add(info.spellID)
             add(info.linkedSpellID)
@@ -1131,15 +1157,15 @@ local function ExtractSpellCandidates(icon)
     -- Blizzard CDM: spell data via cooldownID. Some item frames expose this as a
     -- getter rather than a plain field, so try both before giving up.
     local cooldownID = icon.cooldownID
-    if type(cooldownID) ~= "number" and type(icon.GetCooldownID) == "function" then
+    if not IsUsableID(cooldownID) and type(icon.GetCooldownID) == "function" then
         local ok, value = pcall(icon.GetCooldownID, icon)
         if ok then cooldownID = value end
     end
 
-    if type(cooldownID) == "number" and cooldownID > 0
+    if IsUsableID(cooldownID)
         and C_CooldownViewer and C_CooldownViewer.GetCooldownViewerCooldownInfo then
         local ok, info = pcall(C_CooldownViewer.GetCooldownViewerCooldownInfo, cooldownID)
-        if ok and info then
+        if ok and CanReadTable(info) then
             add(info.overrideSpellID)
             add(info.spellID)
             add(info.linkedSpellID)

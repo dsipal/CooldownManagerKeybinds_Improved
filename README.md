@@ -64,6 +64,7 @@ Groups for BetterCooldownManager or Ayije_CDM only appear in the options once th
 ## Notes
 
 - Keybind text is purely visual — it never changes what your keys actually do, and it never taps the secure/protected action bar system.
+- Midnight (12.0+) introduced **secret values**: the client hides some combat-sensitive data from addons, and any attempt to inspect it raises a Lua error. Every ID this addon reads from a Cooldown Manager icon is checked with `issecretvalue` first, and an icon whose spell/item ID is hidden simply shows no keybind rather than erroring. This mainly affects the Buff Icon and Buff Bar viewers, where some entries may stay blank.
 - Updates are intentionally delayed until you're out of combat to avoid any risk of tainting protected UI code.
 
 ## Credits
