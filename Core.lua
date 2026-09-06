@@ -23,6 +23,8 @@ local FALLBACK_DEFAULTS = {
         viewers = {
             Essential            = { showKeybinds = true, anchor = "TOPRIGHT", fontSize = 13, offsetX = -1, offsetY = -1, fontName = "Friz Quadrata TT", fontFlags = "OUTLINE", color = { 1, 1, 1, 1 } },
             Utility              = { showKeybinds = true, anchor = "TOPRIGHT", fontSize = 12, offsetX = -1, offsetY = -1, fontName = "Friz Quadrata TT", fontFlags = "OUTLINE", color = { 1, 1, 1, 1 } },
+            BuffIcon             = { showKeybinds = true, anchor = "TOPRIGHT", fontSize = 12, offsetX = -1, offsetY = -1, fontName = "Friz Quadrata TT", fontFlags = "OUTLINE", color = { 1, 1, 1, 1 } },
+            BuffBar              = { showKeybinds = true, anchor = "RIGHT",    fontSize = 12, offsetX = -3, offsetY =  0, fontName = "Friz Quadrata TT", fontFlags = "OUTLINE", color = { 1, 1, 1, 1 } },
             Defensives           = { showKeybinds = true, anchor = "TOPRIGHT", fontSize = 12, offsetX = -1, offsetY = -1, fontName = "Friz Quadrata TT", fontFlags = "OUTLINE", color = { 1, 1, 1, 1 } },
             Trinkets             = { showKeybinds = true, anchor = "TOPRIGHT", fontSize = 12, offsetX = -1, offsetY = -1, fontName = "Friz Quadrata TT", fontFlags = "OUTLINE", color = { 1, 1, 1, 1 } },
             Racials              = { showKeybinds = true, anchor = "TOPRIGHT", fontSize = 12, offsetX = -1, offsetY = -1, fontName = "Friz Quadrata TT", fontFlags = "OUTLINE", color = { 1, 1, 1, 1 } },
@@ -38,6 +40,8 @@ local viewers = {
     -- Blizzard CDM (always present)
     EssentialCooldownViewer          = "Essential",
     UtilityCooldownViewer            = "Utility",
+    BuffIconCooldownViewer           = "BuffIcon",
+    BuffBarCooldownViewer            = "BuffBar",
 
     -- BetterCooldownManager (BCDM)
     BCDM_CustomCooldownViewer        = "BCDMCustomSpells",
@@ -1094,51 +1098,74 @@ end
 -- ------------------------------------------------------------
 -- Target extraction
 -- ------------------------------------------------------------
-local function ExtractSpellFromIcon(icon)
+-- Collects every spell ID an icon might plausibly represent, best guess first.
+-- The buff viewers in particular expose the tracked aura on .spellID while the
+-- castable spell that actually owns the keybind sits on .linkedSpellID, so the
+-- caller walks the candidates in order rather than trusting the first one.
+local function ExtractSpellCandidates(icon)
     icon = GetAttachFrame(icon)
     if not icon then return nil end
+
+    local out, seen = {}, {}
+    local function add(id)
+        if type(id) ~= "number" or id <= 0 or seen[id] then return end
+        seen[id] = true
+        out[#out + 1] = id
+    end
 
     -- Ayije_CDM: spell data is accessed via GetCooldownInfo() or GetSpellID()
     if icon.GetCooldownInfo then
         local ok, info = pcall(icon.GetCooldownInfo, icon)
         if ok and info then
-            local sid = info.overrideSpellID or info.spellID or info.linkedSpellID
-            if sid and sid ~= 0 then return sid end
+            add(info.overrideSpellID)
+            add(info.spellID)
+            add(info.linkedSpellID)
         end
     end
 
     if icon.GetSpellID then
         local ok, sid = pcall(icon.GetSpellID, icon)
-        if ok and sid and sid ~= 0 then return sid end
+        if ok then add(sid) end
     end
 
-    -- Blizzard CDM: spell data via cooldownID
-    if icon.cooldownID and C_CooldownViewer and C_CooldownViewer.GetCooldownViewerCooldownInfo then
-        local info = C_CooldownViewer.GetCooldownViewerCooldownInfo(icon.cooldownID)
-        if info and info.spellID then return info.spellID end
+    -- Blizzard CDM: spell data via cooldownID. Some item frames expose this as a
+    -- getter rather than a plain field, so try both before giving up.
+    local cooldownID = icon.cooldownID
+    if type(cooldownID) ~= "number" and type(icon.GetCooldownID) == "function" then
+        local ok, value = pcall(icon.GetCooldownID, icon)
+        if ok then cooldownID = value end
+    end
+
+    if type(cooldownID) == "number" and cooldownID > 0
+        and C_CooldownViewer and C_CooldownViewer.GetCooldownViewerCooldownInfo then
+        local ok, info = pcall(C_CooldownViewer.GetCooldownViewerCooldownInfo, cooldownID)
+        if ok and info then
+            add(info.overrideSpellID)
+            add(info.spellID)
+            add(info.linkedSpellID)
+        end
     end
 
     -- Direct field access (BCDM and others).
     -- Skip on Ayije CDM item frames: spellID is set to the itemID on those frames,
     -- which would cause a false spell match and prevent item lookup.
     if not icon.isItem then
-        local sid = icon.spellID or icon.spellId or icon.SpellID
-        if sid then return sid end
+        add(icon.spellID or icon.spellId or icon.SpellID)
 
         if icon.GetName then
-            sid = BCDMIDFromName(icon:GetName())
-            if sid then return sid end
+            add(BCDMIDFromName(icon:GetName()))
         end
 
         if icon.GetParent then
             local p = icon:GetParent()
             if p and p.GetName then
-                return BCDMIDFromName(p:GetName())
+                add(BCDMIDFromName(p:GetName()))
             end
         end
     end
 
-    return nil
+    if #out == 0 then return nil end
+    return out
 end
 
 local function ExtractItemFromIcon(icon, viewerKey)
@@ -1324,9 +1351,13 @@ local function ApplyViewer(viewerFrameName, viewerKey, map)
                     end
 
                 else
-                    local spellID = ExtractSpellFromIcon(child)
-                    if spellID then
-                        text = LookupKeyForSpell(map, spellID)
+                    local candidates = ExtractSpellCandidates(child)
+                    if candidates then
+                        -- First candidate that actually has a bound key wins.
+                        for i = 1, #candidates do
+                            text = LookupKeyForSpell(map, candidates[i])
+                            if text ~= "" then break end
+                        end
                         hasTarget = true
                     else
                         -- Handles Ayije CDM item frames (e.g. potions in the Racials bar).
@@ -1683,7 +1714,8 @@ local function ShouldScheduleOOC(event, arg1)
         return false
     end
 
-    return event == "UPDATE_BINDINGS"
+    return event == "PLAYER_REGEN_ENABLED"
+        or event == "UPDATE_BINDINGS"
         or event == "UPDATE_MACROS"
         or event == "ACTIONBAR_SLOT_CHANGED"
         or event == "SPELLS_CHANGED"
@@ -1728,6 +1760,7 @@ function Keybinds:Enable()
 
     SafeRegister(eventFrame, "PLAYER_ENTERING_WORLD")
     SafeRegister(eventFrame, "ADDON_LOADED")
+    SafeRegister(eventFrame, "PLAYER_REGEN_ENABLED")
     SafeRegister(eventFrame, "UPDATE_BINDINGS")
     SafeRegister(eventFrame, "UPDATE_MACROS")
     SafeRegister(eventFrame, "ACTIONBAR_SLOT_CHANGED")

@@ -272,6 +272,8 @@ local function BuildOptionsTable()
 
             essential = ViewerGroup("Essential", "Essential", 10),
             utility   = ViewerGroup("Utility", "Utility", 20),
+            buffIcon  = ViewerGroup("BuffIcon", "Buff Icons", 22),
+            buffBar   = ViewerGroup("BuffBar", "Buff Bars", 24),
 
             bcdmInfo = {
                 type  = "description",
@@ -355,7 +357,7 @@ end
 -- modern canvas panel instead.
 local function CreateBlizzardOptionsPanel()
     local panel = CreateFrame("Frame")
-    panel.name = "CooldownManagerKeybinds"
+    panel.name = "CooldownManagerKeybinds (Improved)"
 
     local widget
     panel:SetScript("OnShow", function(self)
