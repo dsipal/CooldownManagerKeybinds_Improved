@@ -85,6 +85,25 @@ local function DefaultFontSize(viewerKey)
     return 12
 end
 
+-- Assisted Combat suggestions are priority/damage abilities, which Blizzard
+-- only ever surfaces through the Essential and Utility viewers, so the rotation
+-- controls stay hidden everywhere else (and on clients without the API).
+local function RotationCapable(viewerKey)
+    if viewerKey ~= "Essential" and viewerKey ~= "Utility" then return false end
+    return C_AssistedCombat ~= nil and C_AssistedCombat.GetNextCastSpell ~= nil
+end
+
+local function RotationHidden(viewerKey)
+    return function() return not RotationCapable(viewerKey) end
+end
+
+local function RotationDisabled(viewerKey)
+    return function()
+        local v = GetViewer(viewerKey)
+        return not (v and v.rotationHighlight)
+    end
+end
+
 local function ViewerGroup(viewerKey, label, order)
     return {
         type  = "group",
@@ -244,6 +263,98 @@ local function ViewerGroup(viewerKey, label, order)
                     local v = GetViewer(viewerKey)
                     if not v then return end
                     v.offsetY = val
+                    NotifyChanged()
+                end,
+            },
+
+            rotationHeader = {
+                type   = "header",
+                name   = "Assisted Combat highlight",
+                order  = 40,
+                hidden = RotationHidden(viewerKey),
+            },
+
+            rotationDesc = {
+                type   = "description",
+                name   = "Animates Blizzard rotation-helper ants on the icon that Assisted Combat currently suggests casting next.",
+                order  = 41,
+                hidden = RotationHidden(viewerKey),
+            },
+
+            rotationHighlight = {
+                type   = "toggle",
+                name   = "Highlight suggested cast",
+                order  = 42,
+                hidden = RotationHidden(viewerKey),
+                get = function()
+                    local v = GetViewer(viewerKey)
+                    return (v and v.rotationHighlight) and true or false
+                end,
+                set = function(_, val)
+                    local v = GetViewer(viewerKey)
+                    if not v then return end
+                    v.rotationHighlight = val
+                    NotifyChanged()
+                end,
+            },
+
+            rotationCombatOnly = {
+                type     = "toggle",
+                name     = "Only in combat",
+                order    = 43,
+                hidden   = RotationHidden(viewerKey),
+                disabled = RotationDisabled(viewerKey),
+                get = function()
+                    local v = GetViewer(viewerKey)
+                    return (v and v.rotationCombatOnly) and true or false
+                end,
+                set = function(_, val)
+                    local v = GetViewer(viewerKey)
+                    if not v then return end
+                    v.rotationCombatOnly = val
+                    NotifyChanged()
+                end,
+            },
+
+            rotationColor = {
+                type     = "color",
+                name     = "Highlight colour",
+                order    = 44,
+                hasAlpha = true,
+                hidden   = RotationHidden(viewerKey),
+                disabled = RotationDisabled(viewerKey),
+                get = function()
+                    local v = GetViewer(viewerKey)
+                    local c = (v and v.rotationColor) or { 1, 1, 1, 1 }
+                    return c[1], c[2], c[3], c[4]
+                end,
+                set = function(_, r, g, b, a)
+                    local v = GetViewer(viewerKey)
+                    if not v then return end
+                    v.rotationColor = { r, g, b, a }
+                    NotifyChanged()
+                end,
+            },
+
+            rotationOverhang = {
+                type     = "range",
+                name     = "Size overhang",
+                desc     = "How far the highlight extends past the icon edge, in pixels.",
+                order    = 45,
+                min      = 0,
+                max      = 12,
+                step     = 1,
+                hidden   = RotationHidden(viewerKey),
+                disabled = RotationDisabled(viewerKey),
+                get = function()
+                    local v = GetViewer(viewerKey)
+                    if not v then return 4 end
+                    return (v.rotationOverhang ~= nil) and v.rotationOverhang or 4
+                end,
+                set = function(_, val)
+                    local v = GetViewer(viewerKey)
+                    if not v then return end
+                    v.rotationOverhang = val
                     NotifyChanged()
                 end,
             },

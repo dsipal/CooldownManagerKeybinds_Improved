@@ -21,8 +21,8 @@ local FALLBACK_DEFAULTS = {
     profile = {
         enabled = true,
         viewers = {
-            Essential            = { showKeybinds = true, anchor = "TOPRIGHT", fontSize = 13, offsetX = -1, offsetY = -1, fontName = "Friz Quadrata TT", fontFlags = "OUTLINE", color = { 1, 1, 1, 1 } },
-            Utility              = { showKeybinds = true, anchor = "TOPRIGHT", fontSize = 12, offsetX = -1, offsetY = -1, fontName = "Friz Quadrata TT", fontFlags = "OUTLINE", color = { 1, 1, 1, 1 } },
+            Essential            = { showKeybinds = true, anchor = "TOPRIGHT", fontSize = 13, offsetX = -1, offsetY = -1, fontName = "Friz Quadrata TT", fontFlags = "OUTLINE", color = { 1, 1, 1, 1 }, rotationHighlight = false, rotationCombatOnly = false, rotationColor = { 1, 1, 1, 1 }, rotationOverhang = 4 },
+            Utility              = { showKeybinds = true, anchor = "TOPRIGHT", fontSize = 12, offsetX = -1, offsetY = -1, fontName = "Friz Quadrata TT", fontFlags = "OUTLINE", color = { 1, 1, 1, 1 }, rotationHighlight = false, rotationCombatOnly = false, rotationColor = { 1, 1, 1, 1 }, rotationOverhang = 4 },
             BuffIcon             = { showKeybinds = true, anchor = "TOPRIGHT", fontSize = 12, offsetX = -1, offsetY = -1, fontName = "Friz Quadrata TT", fontFlags = "OUTLINE", color = { 1, 1, 1, 1 } },
             BuffBar              = { showKeybinds = true, anchor = "RIGHT",    fontSize = 12, offsetX = -3, offsetY =  0, fontName = "Friz Quadrata TT", fontFlags = "OUTLINE", color = { 1, 1, 1, 1 } },
             Defensives           = { showKeybinds = true, anchor = "TOPRIGHT", fontSize = 12, offsetX = -1, offsetY = -1, fontName = "Friz Quadrata TT", fontFlags = "OUTLINE", color = { 1, 1, 1, 1 } },
@@ -86,6 +86,8 @@ local trinketWarmupDelays = { 0.15, 0.35, 0.75, 1.50, 3.00 }
 -- ------------------------------------------------------------
 -- Helpers
 -- ------------------------------------------------------------
+local wipe = wipe or table.wipe
+
 local function SafeRegister(frame, event)
     local ok = pcall(frame.RegisterEvent, frame, event)
     return ok
@@ -193,7 +195,7 @@ local function IsAnyViewerEnabled()
     if not ns.db or not ns.db.profile or not ns.db.profile.enabled then return false end
     for _, viewerKey in pairs(viewers) do
         local v = ns.db.profile.viewers and ns.db.profile.viewers[viewerKey]
-        if v and v.showKeybinds then return true end
+        if v and (v.showKeybinds or v.rotationHighlight) then return true end
     end
     return false
 end
@@ -1041,7 +1043,7 @@ local function GetOrCreateOverlay(icon)
     -- Do NOT set a fixed strata here; inherit from the parent icon so the
     -- overlay never floats above frames (e.g. the world map) that sit in a
     -- higher strata than the cooldown viewer itself.
-    icon.cmkKeybindText:SetFrameLevel(icon:GetFrameLevel() + 1)
+    icon.cmkKeybindText:SetFrameLevel(icon:GetFrameLevel() + 2)
 
     local t = icon.cmkKeybindText:CreateFontString(nil, "OVERLAY", "NumberFontNormalSmall")
     t:SetShadowColor(0, 0, 0, 1)
@@ -1447,6 +1449,427 @@ local function ApplyAllViewerStyles()
     end
 end
 
+
+-- ------------------------------------------------------------
+-- Assisted Combat rotation highlight
+-- ------------------------------------------------------------
+-- Blizzard renders its rotation helper on action buttons only -- there is no
+-- Cooldown Manager equivalent and no CooldownViewer category for it -- so we
+-- draw it ourselves: ask C_AssistedCombat which spell it wants cast next, then
+-- animate Blizzard's own ants atlas on whichever viewer icon matches.
+--
+-- This is deliberately kept out of the keybind pipeline. The suggestion changes
+-- constantly *during* combat, whereas every keybind rebuild is deferred until
+-- combat ends. Instead we precompute a baseSpellID -> {glow,...} index whenever
+-- the layout changes, so the in-combat tick is one API call and one compare.
+local Rotation = {}
+ns.Rotation = Rotation
+
+local ROTATION_VIEWERS = {
+    EssentialCooldownViewer = "Essential",
+    UtilityCooldownViewer   = "Utility",
+}
+
+local ROTATION_ATLAS    = "RotationHelper_Ants_Flipbook_2x"
+local ROTATION_ROWS     = 6
+local ROTATION_COLS     = 5
+local ROTATION_FRAMES   = 30
+local ROTATION_DURATION = 1.0
+
+local rotationEnabled        = false
+local rotationHooksInstalled = false
+local rotationSpells         = {}    -- [baseSpellID] = true
+local rotationSpellsValid    = false
+local rotationIndex          = {}    -- [baseSpellID] = { glow, ... }
+local rotationFrames         = {}    -- every glow we ever created
+local activeHighlights       = {}    -- glows currently shown
+local currentSuggestion      = nil
+local rotationIndexDirty     = true
+local scheduledRotation      = false
+
+-- Defined in the poll driver further down; forward-declared because the index
+-- rebuild is what decides whether the poll should be running at all.
+local StartRotationPoll, StopRotationPoll
+
+local function GetRotationSettings(viewerKey)
+    local v = (ns.db and ns.db.profile and ns.db.profile.viewers and ns.db.profile.viewers[viewerKey]) or {}
+    return {
+        combatOnly = v.rotationCombatOnly and true or false,
+        color      = v.rotationColor or { 1, 1, 1, 1 },
+        overhang   = (v.rotationOverhang ~= nil) and v.rotationOverhang or 4,
+    }
+end
+
+local function IsRotationEnabled(viewerKey)
+    if not ns.db or not ns.db.profile or not ns.db.profile.enabled then return false end
+    local v = ns.db.profile.viewers and ns.db.profile.viewers[viewerKey]
+    return (v and v.rotationHighlight) and true or false
+end
+
+local function IsRotationEnabledForAnyViewer()
+    for _, viewerKey in pairs(ROTATION_VIEWERS) do
+        if IsRotationEnabled(viewerKey) then return true end
+    end
+    return false
+end
+
+-- ------------------------------------------------------------
+-- Blizzard API wrappers (secret-safe)
+-- ------------------------------------------------------------
+local function GetBaseSpellID(spellID)
+    if not IsUsableID(spellID) then return nil end
+    if C_Spell and C_Spell.GetBaseSpell then
+        local ok, base = pcall(C_Spell.GetBaseSpell, spellID)
+        if ok and IsUsableID(base) then return base end
+    end
+    return spellID
+end
+
+local function GetSuggestedSpellID()
+    if not C_AssistedCombat or not C_AssistedCombat.GetNextCastSpell then return nil end
+    -- false decouples us from the visible action buttons and from the
+    -- assistedCombatHighlight CVar, so the highlight still works when
+    -- Blizzard's own rotation display is switched off.
+    local ok, id = pcall(C_AssistedCombat.GetNextCastSpell, false)
+    if not ok then return nil end
+    if not IsUsableID(id) then return nil end
+    return id
+end
+
+local function RefreshRotationSpells()
+    wipe(rotationSpells)
+    if C_AssistedCombat and C_AssistedCombat.GetRotationSpells then
+        local ok, list = pcall(C_AssistedCombat.GetRotationSpells)
+        if ok and CanReadTable(list) then
+            for _, id in ipairs(list) do
+                local base = GetBaseSpellID(id)
+                if base then rotationSpells[base] = true end
+            end
+        end
+    end
+    rotationSpellsValid = true
+end
+
+-- ------------------------------------------------------------
+-- Highlight frames
+-- ------------------------------------------------------------
+local function ApplyRotationStyle(f, viewerKey)
+    if not f or not f.tex then return end
+
+    local s = GetRotationSettings(viewerKey or f.viewerKey)
+
+    local icon = f:GetParent()
+    if icon and icon.GetFrameLevel then
+        pcall(f.SetFrameLevel, f, icon:GetFrameLevel() + 1)
+    end
+
+    -- The ants have to overhang the icon border. Sizing from icon:GetWidth()
+    -- is not an option: viewer geometry can be a secret value and arithmetic
+    -- on one raises a Lua error. Anchoring opposite corners with a fixed inset
+    -- lets the layout engine resolve the size instead, so no Lua arithmetic
+    -- ever touches icon geometry. Hence a pixel overhang, not a scale factor.
+    local o = s.overhang
+    f.tex:ClearAllPoints()
+    f.tex:SetPoint("TOPLEFT",     f, "TOPLEFT",     -o,  o)
+    f.tex:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT",  o, -o)
+
+    local c = s.color
+    local r, g, b, a = c[1] or 1, c[2] or 1, c[3] or 1, c[4] or 1
+    -- An ADD-blended atlas tints muddy unless it is desaturated first.
+    f.tex:SetDesaturated(not (r >= 1 and g >= 1 and b >= 1))
+    f.tex:SetVertexColor(r, g, b, a)
+end
+
+local function CreateRotationHighlight(icon, viewerKey)
+    icon = GetAttachFrame(icon)
+    if not icon then return nil end
+    if icon.cmkRotationGlow then
+        icon.cmkRotationGlow.viewerKey = viewerKey
+        return icon.cmkRotationGlow
+    end
+
+    local f = CreateFrame("Frame", nil, icon)
+    f:EnableMouse(false)
+    f:SetAllPoints(icon)
+    f:Hide()
+
+    local tex = f:CreateTexture(nil, "OVERLAY", nil, 7)
+    tex:SetBlendMode("ADD")
+    -- false stops the atlas from imposing its own size over our anchors.
+    tex:SetAtlas(ROTATION_ATLAS, false)
+
+    local anim = tex:CreateAnimationGroup()
+    anim:SetLooping("REPEAT")
+    local flip = anim:CreateAnimation("FlipBook")
+    flip:SetDuration(ROTATION_DURATION)
+    flip:SetFlipBookRows(ROTATION_ROWS)
+    flip:SetFlipBookColumns(ROTATION_COLS)
+    flip:SetFlipBookFrames(ROTATION_FRAMES)
+    flip:SetFlipBookFrameWidth(0)
+    flip:SetFlipBookFrameHeight(0)
+
+    f.tex = tex
+    f.anim = anim
+    f.viewerKey = viewerKey
+
+    -- Driving the animation from Show/Hide means a hidden glow costs nothing,
+    -- and the animation stops by itself when the CDM hides the parent icon.
+    f:SetScript("OnShow", function(self)
+        if self.anim and not self.anim:IsPlaying() then self.anim:Play() end
+    end)
+    f:SetScript("OnHide", function(self)
+        if self.anim and self.anim:IsPlaying() then self.anim:Stop() end
+    end)
+
+    icon.cmkRotationGlow = f
+    rotationFrames[#rotationFrames + 1] = f
+    return f
+end
+
+local function HideRotationHighlights()
+    for i = #activeHighlights, 1, -1 do
+        activeHighlights[i]:Hide()
+        activeHighlights[i] = nil
+    end
+end
+
+local function ShowRotationHighlightsFor(baseID)
+    local list = baseID and rotationIndex[baseID]
+    if not list then return end
+
+    local inCombat = InCombat()
+    for i = 1, #list do
+        local f = list[i]
+        local s = GetRotationSettings(f.viewerKey)
+        if inCombat or not s.combatOnly then
+            f:Show()
+            activeHighlights[#activeHighlights + 1] = f
+        end
+    end
+end
+
+-- ------------------------------------------------------------
+-- Hot path: runs ~10x/sec in combat, so it must stay O(1)
+-- ------------------------------------------------------------
+local function RefreshRotationSuggestion(force)
+    if not rotationEnabled then return end
+
+    local id = GetSuggestedSpellID()
+    local base = id and GetBaseSpellID(id) or nil
+
+    if base == currentSuggestion and not force then return end
+    currentSuggestion = base
+
+    HideRotationHighlights()
+    if base then ShowRotationHighlightsFor(base) end
+end
+
+local function RebuildRotationIndex()
+    if not rotationSpellsValid then RefreshRotationSpells() end
+
+    local newIndex, matched, found = {}, {}, 0
+
+    for viewerName, viewerKey in pairs(ROTATION_VIEWERS) do
+        if IsRotationEnabled(viewerKey) then
+            local kids = GetViewerChildren(viewerName, viewerKey)
+            for _, child in ipairs(kids) do
+                child = GetAttachFrame(child)
+                if child then
+                    local candidates = ExtractSpellCandidates(child)
+                    if candidates then
+                        -- Index every candidate, not just the first: an icon can
+                        -- expose overrideSpellID/spellID/linkedSpellID and the
+                        -- suggestion may come back as any one of them.
+                        for i = 1, #candidates do
+                            local base = GetBaseSpellID(candidates[i])
+                            if base and rotationSpells[base] then
+                                local f = CreateRotationHighlight(child, viewerKey)
+                                if f then
+                                    ApplyRotationStyle(f, viewerKey)
+                                    local bucket = newIndex[base]
+                                    if not bucket then
+                                        bucket = {}
+                                        newIndex[base] = bucket
+                                    end
+                                    bucket[#bucket + 1] = f
+                                    matched[f] = true
+                                    found = found + 1
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    -- In combat every icon's spell ID can legitimately be secret, so a rebuild
+    -- can match nothing at all. Keep the last known-good index rather than
+    -- blanking the highlight for the rest of the fight, and retry on regen.
+    if found == 0 and next(rotationIndex) ~= nil and InCombat() then
+        rotationIndexDirty = true
+        return
+    end
+
+    rotationIndex = newIndex
+    HideRotationHighlights()
+    currentSuggestion = nil
+
+    for i = 1, #rotationFrames do
+        if not matched[rotationFrames[i]] then rotationFrames[i]:Hide() end
+    end
+
+    rotationIndexDirty = false
+
+    if next(rotationIndex) then StartRotationPoll() else StopRotationPoll() end
+    RefreshRotationSuggestion(true)
+end
+
+-- Coalesces relayout bursts. Deliberately not combat-gated, unlike the keybind
+-- schedulers -- the guard above handles the in-combat case instead.
+local function ScheduleRotationRebuild()
+    if not rotationEnabled then return end
+
+    rotationIndexDirty = true
+    if scheduledRotation then return end
+    scheduledRotation = true
+
+    C_Timer.After(0.20, function()
+        scheduledRotation = false
+        if not rotationEnabled then
+            rotationIndexDirty = false
+            return
+        end
+        if rotationIndexDirty then RebuildRotationIndex() end
+    end)
+end
+
+-- ------------------------------------------------------------
+-- Poll driver
+-- ------------------------------------------------------------
+local rotationPoller = CreateFrame("Frame")
+local rotationPollElapsed = 0
+local rotationPollRate = 0.1
+
+local function RefreshRotationPollRate()
+    local rate
+    if C_CVar and C_CVar.GetCVar then
+        local ok, v = pcall(C_CVar.GetCVar, "assistedCombatIconUpdateRate")
+        if ok then rate = tonumber(v) end
+    end
+    rate = rate or 0.1
+    if rate < 0.05 then rate = 0.05 elseif rate > 1 then rate = 1 end
+    rotationPollRate = rate
+end
+
+function StopRotationPoll()
+    rotationPoller:SetScript("OnUpdate", nil)
+end
+
+function StartRotationPoll()
+    rotationPollElapsed = 0
+    RefreshRotationPollRate()
+    rotationPoller:SetScript("OnUpdate", function(_, elapsed)
+        rotationPollElapsed = rotationPollElapsed + elapsed
+        if rotationPollElapsed < rotationPollRate then return end
+        rotationPollElapsed = 0
+        RefreshRotationSuggestion()
+    end)
+end
+
+-- The poll is the authoritative source; these only cut latency, and only fire
+-- while Blizzard's own CVar-driven highlight is active. hooksecurefunc cannot
+-- be undone, so the enabled check has to live inside the callback.
+local function InstallRotationHooks()
+    if rotationHooksInstalled then return end
+    rotationHooksInstalled = true
+
+    if EventRegistry and EventRegistry.RegisterCallback then
+        pcall(EventRegistry.RegisterCallback, EventRegistry,
+            "AssistedCombatManager.OnAssistedHighlightSpellChange",
+            function() RefreshRotationSuggestion() end, rotationPoller)
+    end
+
+    if hooksecurefunc and AssistedCombatManager
+        and type(AssistedCombatManager.UpdateAllAssistedHighlightFramesForSpell) == "function" then
+        hooksecurefunc(AssistedCombatManager, "UpdateAllAssistedHighlightFramesForSpell", function()
+            RefreshRotationSuggestion()
+        end)
+    end
+end
+
+-- ------------------------------------------------------------
+-- Module surface
+-- ------------------------------------------------------------
+function Rotation:Enable()
+    if rotationEnabled then return end
+    rotationEnabled = true
+
+    InstallRotationHooks()
+    rotationSpellsValid = false
+    RefreshRotationSpells()
+    RebuildRotationIndex()
+end
+
+function Rotation:Disable()
+    rotationEnabled = false
+    StopRotationPoll()
+    HideRotationHighlights()
+
+    -- Frames cannot be destroyed in WoW; hiding stops their animations.
+    for i = 1, #rotationFrames do rotationFrames[i]:Hide() end
+
+    rotationIndex = {}
+    currentSuggestion = nil
+    rotationIndexDirty = true
+end
+
+function Rotation:RefreshStyle()
+    for i = 1, #rotationFrames do ApplyRotationStyle(rotationFrames[i]) end
+end
+
+function Rotation:OnSettingChanged()
+    local want = IsRotationEnabledForAnyViewer()
+
+    if want and not rotationEnabled then
+        self:Enable()
+        return
+    end
+    if not want and rotationEnabled then
+        self:Disable()
+        return
+    end
+    if not rotationEnabled then return end
+
+    RebuildRotationIndex()
+    self:RefreshStyle()
+end
+
+function Rotation:InvalidateSpells()
+    rotationSpellsValid = false
+    ScheduleRotationRebuild()
+end
+
+function Rotation:OnCombatChanged()
+    if not rotationEnabled then return end
+    if rotationIndexDirty then
+        ScheduleRotationRebuild()
+    else
+        RefreshRotationSuggestion(true)
+    end
+end
+
+function Rotation:OnCVarChanged(cvar)
+    if not rotationEnabled then return end
+    -- CVAR_UPDATE fires for every cvar in the game; ignore all but ours.
+    if IsUsableString(cvar) and cvar ~= "assistedCombatIconUpdateRate" then return end
+    RefreshRotationPollRate()
+end
+
+-- Exposed so EnsureViewerHooks (below) can flag a rebuild on relayout.
+local function IsRotationViewer(viewerName)
+    return ROTATION_VIEWERS[viewerName] ~= nil
+end
 -- ------------------------------------------------------------
 -- Trinket warmup refresh (fixes "no keybind until interaction")
 -- ------------------------------------------------------------
@@ -1531,6 +1954,7 @@ local function EnsureViewerHooks()
                     hooksecurefunc(f, "RefreshLayout", function()
                         if not isEnabled then return end
                         CacheViewerChildren(viewerName, viewerKey)
+                        if IsRotationViewer(viewerName) then ScheduleRotationRebuild() end
                         if InCombat() then
                             ScheduleOutOfCombatUpdate(viewerKey .. ":RefreshLayout")
                             return
@@ -1571,6 +1995,7 @@ local function EnsureViewerHooks()
                     f:HookScript("OnShow", function()
                         if not isEnabled then return end
                         CacheViewerChildren(viewerName, viewerKey)
+                        if IsRotationViewer(viewerName) then ScheduleRotationRebuild() end
                         if InCombat() then
                             ScheduleOutOfCombatUpdate(viewerKey .. ":OnShow")
                             return
@@ -1639,6 +2064,7 @@ local function ScheduleStyleRefresh()
         end
 
         ApplyAllViewerStyles()
+        Rotation:RefreshStyle()
     end
 
     C_Timer.After(0.05, run)
@@ -1758,9 +2184,31 @@ local function ShouldScheduleOOC(event, arg1)
         or event == "UPDATE_POSSESS_BAR"
 end
 
+-- The rotation spell list depends on talents/spec/forms, so these invalidate it.
+-- Deliberately NOT added to ShouldScheduleOOC: routing UPDATE_SHAPESHIFT_FORM or
+-- PLAYER_TALENT_UPDATE there would trigger a full keybind RebuildMapping on every
+-- druid form change.
+local function ShouldInvalidateRotationSpells(event)
+    return event == "PLAYER_TALENT_UPDATE"
+        or event == "SPELLS_CHANGED"
+        or event == "PLAYER_SPECIALIZATION_CHANGED"
+        or event == "TRAIT_CONFIG_UPDATED"
+        or event == "UPDATE_SHAPESHIFT_FORM"
+        or event == "EDIT_MODE_LAYOUTS_UPDATED"
+        or event == "PLAYER_ENTERING_WORLD"
+end
+
 local eventFrame = CreateFrame("Frame")
 eventFrame:SetScript("OnEvent", function(_, event, arg1)
     if not isEnabled then return end
+
+    if ShouldInvalidateRotationSpells(event) then
+        Rotation:InvalidateSpells()
+    elseif event == "PLAYER_REGEN_ENABLED" or event == "PLAYER_REGEN_DISABLED" then
+        Rotation:OnCombatChanged()
+    elseif event == "CVAR_UPDATE" then
+        Rotation:OnCVarChanged(arg1)
+    end
 
     if ShouldRunSeries(event, arg1) then
         ScheduleRebuildSeries(event)
@@ -1803,15 +2251,25 @@ function Keybinds:Enable()
     SafeRegister(eventFrame, "UPDATE_VEHICLE_ACTIONBAR")
     SafeRegister(eventFrame, "UPDATE_POSSESS_BAR")
 
+    -- Rotation-highlight only. These must not reach ShouldScheduleOOC.
+    SafeRegister(eventFrame, "PLAYER_REGEN_DISABLED")
+    SafeRegister(eventFrame, "UPDATE_SHAPESHIFT_FORM")
+    SafeRegister(eventFrame, "PLAYER_TALENT_UPDATE")
+    SafeRegister(eventFrame, "CVAR_UPDATE")
+
     HookBindingChanges()
     EnsureViewerHooks()
 
     ScheduleRebuildSeries("enable")
     ScheduleTrinketWarmup("enable")
+
+    Rotation:OnSettingChanged()
 end
 
 function Keybinds:Disable()
     if not isEnabled then return end
+
+    Rotation:Disable()
 
     isEnabled = false
     mappingCache = nil
@@ -1855,10 +2313,14 @@ function Keybinds:OnSettingChanged()
     end
 
     ScheduleOutOfCombatUpdate("settings")
+
+    -- Combat-safe by design, so unlike the keybind half this applies at once.
+    Rotation:OnSettingChanged()
 end
 
 function Keybinds:ResetProfileToDefaults()
     if not ns.db then return end
+    Rotation:Disable()
     ns.db:ResetProfile()
     mappingCache = nil
     viewerChildrenCache = {}

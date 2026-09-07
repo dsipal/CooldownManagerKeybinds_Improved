@@ -2,7 +2,7 @@
 ## Title: CooldownManagerKeybinds (Improved)
 ## Notes: Shows action bar keybinds on Blizzard Cooldown Manager icons.
 ## Author: ahux
-## Version: 1.3.1
+## Version: 1.4.0
 ## SavedVariables: CMK_DB
 ## IconTexture: Interface\AddOns\CooldownManagerKeybinds_Improved\icon
 ## Category: Combat
