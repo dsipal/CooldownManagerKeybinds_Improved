@@ -18,7 +18,6 @@ Shows your action bar keybinds directly on Blizzard's Cooldown Manager icons —
   - Font size and outline style
   - Font colour (with alpha/transparency)
   - Anchor point and X/Y offset
-- **Assisted Combat rotation highlight** (opt-in, Essential and Utility viewers) — animates Blizzard's own rotation-helper ants on whichever Cooldown Manager icon `C_AssistedCombat` currently suggests casting next, so the rotation helper is visible on the Cooldown Manager rather than only on your action bars. Per viewer you can toggle it, restrict it to combat, set the colour/transparency, and adjust how far the highlight extends past the icon edge. Off by default.
 - **Combat-safe and low overhead** — all scans and rebuilds are deferred until you leave combat; updates run on a light retry schedule instead of every frame.
 - **Reacts automatically** to keybind changes, spec changes, talent changes, equipment changes, macro edits, Edit Mode layout changes, and vehicle/override/possess action bars.
 - **Blizzard-native options panel** — settings are embedded directly into `Options > AddOns` instead of a separate floating window.
@@ -65,8 +64,6 @@ Groups for BetterCooldownManager or Ayije_CDM only appear in the options once th
 ## Notes
 
 - Keybind text is purely visual — it never changes what your keys actually do, and it never taps the secure/protected action bar system.
-- The rotation highlight is drawn by this addon, not by Blizzard: Blizzard renders its rotation helper on action buttons only, and the Cooldown Manager has no rotation category. If you also run **CooldownManagerCentered**, enable its rotation highlight or this one, not both — they draw on the same icons.
-- Unlike the keybind labels, the rotation highlight updates live *during* combat. It runs on its own lightweight path (a precomputed spell index plus a poll at Blizzard's `assistedCombatIconUpdateRate`), so it never triggers the addon's action-bar rescan.
 - Midnight (12.0+) introduced **secret values**: the client hides some combat-sensitive data from addons, and any attempt to inspect it raises a Lua error. Every ID this addon reads from a Cooldown Manager icon is checked with `issecretvalue` first, and an icon whose spell/item ID is hidden simply shows no keybind rather than erroring. This mainly affects the Buff Icon and Buff Bar viewers, where some entries may stay blank.
 - Updates are intentionally delayed until you're out of combat to avoid any risk of tainting protected UI code.
 
